@@ -261,12 +261,6 @@ class RecommendationEngine:
         self.iterations = 10
         self.regularization_parameter = 0.1
         self.__train_data()
-        user_Id = 'ZaEAomVq-oW3nwjHHiYatw'
-        business_Ids = ['5UmKMjUEUNdYWqANhGckJw', 'UsFtqoBl7naz8AVUBZMjQQ', '3eu6MEFlq2Dg7bQh8QbdOg', 'cE27W9VPgO88Qxe4ol6y_g']
-        address = 'Henderson, NV'
-        state = 'NV'
-        city = 'Henderson'
-        category = 'Skin Care'
         logger.info("Recommendation engine Finished")
 
         
