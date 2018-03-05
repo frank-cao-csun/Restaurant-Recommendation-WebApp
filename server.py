@@ -8,6 +8,10 @@ def init_spark_context():
     #load the spark context
     conf = SparkConf().setAppName("Restaurant Recommendations")
     #Adding additional Python modules
+    conf = (conf.setMaster('local[*]')
+        .set('spark.executor.memory', '2G')
+        .set('spark.driver.memory', '10G')
+        .set('spark.driver.maxResultSize', '5G'))
     sc=SparkContext(conf=conf, pyFiles=['engine.py','app.py'])
     return sc
 
