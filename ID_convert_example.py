@@ -1,5 +1,5 @@
 import os,json,logging,time
-from pyspark import SparkContext, SparkConf
+from pyspark import SparkContext
 from pyspark.sql import SparkSession, Row
 from pyspark.sql.functions import col, count
 from pyspark.ml.feature import StringIndexer
