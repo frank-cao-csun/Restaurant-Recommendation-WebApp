@@ -1,8 +1,11 @@
-import json, logging, os
-import datetime
-from pyspark.mllib.recommendation import ALS, Rating
+import json, logging, os, time
+import pandas
+from pyfiglet import figlet_format
+from pyspark.ml.recommendation import ALS, ALSModel
+from pyspark.ml.feature import StringIndexerModel, IndexToString
 from pyspark.rdd import RDD
 from pyspark.sql.context import SQLContext
+from pyspark.sql.functions import col, count, lit, desc
 
 #Setup system logging
 logging.basicConfig(level=logging.INFO)
@@ -10,31 +13,44 @@ logger = logging.getLogger(__name__)
     
 class RecommendationEngine:
       
-    def __train_data(self):
-        #Convert all Strings ids in review to int ids
-        ratings = self.__convert_string_to_int()
-        logger.info("Train the ALS model with current dataset")        
-        self.model = ALS.train(ratings, self.rank, seed=self.seed,
-                               iterations=self.iterations, lambda_=self.regularization_parameter)
-        logger.info("ALS model built!")
-        #Save the model to file
-        now = datetime.datetime.now()
-        file_name = str(now)[:16]
-        model_save_path = os.path.join('model',file_name)
-        self.model.save(model_save_path)
-    
-    @staticmethod
-    def presentInList(listCategory,category):
-        for i in listCategory:
-            if i == category:
-                return True
-        return False
+    def __init__(self, spark_session, dataset):
+        logger.warn(figlet_format('Eat-Smart',font='big'))
+        logger.error("Eat-Smart core start")    
+        self.ss = spark_session
+        self.ds = dataset
+        # Train the model
+        self.test_api()
+        #self.train_model()        
+        logger.error("Eat-Smart Core Ready")
 
-    def __predict_ratings(self, userId_businessId_RDD):
+    def test_api(self):
+
+        final_indexed_save = os.path.join('dataset','review_vegas_als.parquet')
+        self.reviewDF = self.ss.read.parquet(final_indexed_save).cache()
+        self.model_save = os.path.join('model','als_model_vegas')
+        self.indexer_user_save = os.path.join('model','user_ind_model')
+    
+    def train_model(self):
+        #load als
+        final_indexed_save = os.path.join('dataset','review_vegas_als.parquet')
+        self.reviewDF = self.ss.read.parquet(final_indexed_save).cache()
+        logger.error("Train the ALS model with current dataset")        
+        als = ALS(rank= 8, maxIter= 15, regParam=0.25, userCol="user_id_num", 
+              itemCol="business_id_num", ratingCol="stars_long", coldStartStrategy="nan")
+        self.model = als.fit(self.reviewDF)
+        logger.error("ALS model built!")
+        #Save the model to file
+        self.model_save = os.path.join('model','als_model_vegas')
+        self.model.write().overwrite().save(self.model_save)
+        #now = datetime.datetime.now()
+        #file_name = str(now)[:16]
+
+
+    def __predict_ratings(self, predDF):
         #Predict rates based on ALS model(Collaborative Filtering)
-        predict_ratings = self.model.predictAll(userId_businessId_RDD)
+        #predict_ratings = self.model.predictAll(userId_businessId_RDD)
         #Convert int ids to string ids
-        predict_ratings_string = self.__convert_int_to_string(predict_ratings)
+       
         #Add user Names and business names and addresses along with predicted ratings
         user_names = self.user_ids.map(lambda x:(x[0],x[1][0]))
         business_names = self.business_ids.map(lambda x:(x[0],(x[1][0],x[1][1])))
@@ -43,15 +59,40 @@ class RecommendationEngine:
         return predict_ratings_string
 
     def get_top_ratings(self, user_id, count):
-        """Recommends up to count top unrated businesses to user_id
+        """Retrun top <count> bussiness
+           Calls 
         """
-        user_unrated_business_rdd = self.review_ids.filter(lambda rating: not rating[0] == user_id)\
-                                                 .map(lambda x: (user_id, x[1])).distinct()                                                
-        user_unrated_business_intids_rdd=self.__convert_string_ids_to_int(user_unrated_business_rdd)                                                                                        
-        # Get predicted ratings
-        ratings = self.__predict_ratings(user_unrated_business_intids_rdd)\
-                                        .filter(lambda r: r[2]>=3).takeOrdered(count,key = lambda x: -x[2])    
-        return ratings  
+        start_time  = time.time()
+        #bid = self.reviewDF.select('business_id_num','business_id').distinct().cache()
+        businessDF_vegas_food_save = os.path.join('dataset','businessDF_vegas_food.parquet')
+        businessDF_vegas_food = self.ss.read.parquet(businessDF_vegas_food_save)
+
+        #bid.show(20)
+        logger.error('{} seconds has elapsed. {} entries remained'.format(time.time() - start_time, businessDF_vegas_food.count())) 
+        #predDF = bid.filter(bid['user_id'] == user_id)
+        #build user request using input id
+        logger.error('{} seconds has elapsed before loading building predDF'.format(time.time() - start_time))
+        bid = businessDF_vegas_food.select('business_id','latitude','longitude')
+        indexer_business_save = os.path.join('model', 'bus_ind_model')
+        indexer_business_model = StringIndexerModel.load(indexer_business_save)
+        bid = indexer_business_model.transform(bid)
+        predDF = bid.withColumn("user_id", lit(user_id)).cache()
+
+        logger.error('{} seconds has elapsed before loading indexer'.format(time.time() - start_time))
+        indexer_user_model = StringIndexerModel.load(self.indexer_user_save)
+        predDF = indexer_user_model.transform(predDF)
+        '''user_id_converter =  IndexToString(inputCol= 'user_id',outputCol='user_id')
+        convert_df = '''
+        #predDF.show(10)
+        logger.error('{} seconds has elapsed before model'.format(time.time() - start_time))
+        model = ALSModel.load(self.model_save)
+        prediction_user = model.transform(predDF)
+        #prediction_user.show(20)
+        ratings = prediction_user.sort(desc('prediction')).limit(count).select('business_id','prediction','latitude','longitude')
+        #ratings.show(20)
+        #ratings.printSchema()
+        logger.error('{} seconds has elapsed'.format(time.time() - start_time))
+        return ratings.toPandas().to_json(orient='records')
                    
     def add_ratings(self, ratings):
         """Add additional review ratings in the format (user_id, business_id, ratings)
@@ -61,24 +102,19 @@ class RecommendationEngine:
         # Add new ratings to the existing ones
         self.ratings_RDD = self.review_ids.union(new_ratings_RDD)
         # Re-train the ALS model with the new ratings
-        self.__train_data()     
-        return ratings 
-             
-    def __convert_string_ids_to_int(self,user_business_RDD):
-        user_ids_replace = self.int_user_id_to_string.join(user_business_RDD).map(lambda x: (x[1][0], x[1][1]))
-        requested_ids = self.int_business_id_to_string.keyBy(lambda x: x[0]).rightOuterJoin(user_ids_replace.map(lambda x: (x[1], x[0]))).map(lambda x : (x[1][1], x[1][0][1]))     
-        return requested_ids 
+        #self.__train_data()     
+        return ratings
 
-    def __convert_int_to_string(self,user_ids_business_ids_int):
-        #Convert int Ids backto string       
-        user_ids_business_ids_int=user_ids_business_ids_int.map(lambda x: (x[0],(x[1],x[2])))
-        #Replace userIds
-        user_ids_to_string_replaced = self.reverse_mapping_user_ids.join(user_ids_business_ids_int);
-        #Replace business Ids
-        replace_both = user_ids_to_string_replaced.keyBy(lambda x: x[1][1][0]).join(self.reverse_mapping_business_ids).map(lambda x: (x[1][0][1][0],x[1][1],x[1][0][1][1][1]))       
-        return replace_both
+    @staticmethod
+    def presentInList(listCategory,category):
+        for i in listCategory:
+            if i == category:
+                return True
+        return False 
 
-    def __train_all_data(self):
+    
+    def train_best_model(self):
+
         min_error = float('inf') 
         best_rank = -1
         best_iteration = -1
@@ -111,44 +147,6 @@ class RecommendationEngine:
         print('The best model was trained with rank %s' % best_rank)
         
         predictions = model.predictAll(test_for_predict_RDD).map(lambda r: ((r[0], r[1]), r[2]))
-        rates_and_preds = test_RDD.map(lambda r: ((int(r[0]), int(r[1])), float(r[2]))).join(predictions)
-        error = math.sqrt(rates_and_preds.map(lambda r: (r[1][0] - r[1][1])**2).mean())
-        print('For testing data the RMSE is %s' % (error)            
-        
-    def __init__(self, spark_context, dataset):
-        logger.info("Recommendation engine start")
-        self.sc = spark_context
-        
-         # extracting review set
-        review_file = os.path.join(dataset, 'yelp_academic_dataset_review.json')
-        review_raw_RDD = self.sc.textFile(review_file)    
-        data = review_raw_RDD.map(lambda line: json.loads(line))
-        self.review_ids = data.map(lambda line: (line['user_id'], line['business_id'], line['stars'])).cache();
-        
-        # extract user ids and friends for social collaborative filtering
-        user_file = os.path.join(dataset, 'yelp_academic_dataset_user.json')
-        user_raw_RDD = self.sc.textFile(user_file)    
-        user_data = user_raw_RDD.map(lambda line: json.loads(line))
-        self.user_ids = user_data.map(lambda line: (line['user_id'], (line['name'],line['friends']))).cache()       
-          
-        # extract business_id                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            s
-        business_file = os.path.join(dataset, 'yelp_academic_dataset_business.json')
-        business_raw_RDD = self.sc.textFile(business_file)    
-        business_data = business_raw_RDD.map(lambda line: json.loads(line))
-        self.business_ids = business_data.map(lambda line: (line['business_id'],(line['name'], line['address'],line['categories'],line['state'],line['city'], line['latitude'],line['longitude'],line['stars'])))
-        
-        self.r = self.review_ids.map(lambda x: (x[0], x[2])).groupByKey()                                                                                                                                                                                                                                                                                                                                                                                              
-         
-        #Convert String ids to int ids and reverse it for ALS training 
-        self.int_user_id_to_string = self.user_ids.map(lambda x: x[0]).distinct().zipWithUniqueId().cache()  
-        self.int_business_id_to_string = self.business_ids.map(lambda x: x[0]).distinct().zipWithUniqueId().cache()   
-        self.reverse_mapping_user_ids = self.int_user_id_to_string.map(lambda x: (x[1], x[0]))
-        self.reverse_mapping_business_ids = self.int_business_id_to_string.map(lambda x: (x[1], x[0])) 
-       
-        # Train the model
-        self.rank = 8
-        self.seed = 5
-        self.iterations = 10
-        self.regularization_parameter = 0.1
-        self.__train_data()        
-        logger.info("Recommendation engine Finished")
+        #rates_and_preds = test_RDD.map(lambda r: ((int(r[0]), int(r[1])), float(r[2]))).join(predictions)
+        #error = math.sqrt(rates_and_preds.map(lambda r: (r[1][0] - r[1][1])**2).mean())
+        #print('For testing data the RMSE is %s' % (error)
